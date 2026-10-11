@@ -2,6 +2,10 @@
 
 A browser game room for a Borg-themed Discord community. One player hosts a room and shares its link; two to ten players can join from their own phones or computers. The host browser runs the room authority and the players connect directly through PeerJS, so the project needs no account, database, API key, or continuously running server.
 
+## Live site
+
+https://phoenixcryos.github.io/unimatrix-social-deck/
+
 ## The five games
 
 | Game | Players | Design and rules |
