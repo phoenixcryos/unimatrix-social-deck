@@ -6,7 +6,7 @@ A browser game room for a Borg-themed Discord community. One player hosts a room
 
 https://phoenixcryos.github.io/unimatrix-social-deck/
 
-## The five games
+## Original five simulations
 
 | Game | Players | Design and rules |
 | --- | --- | --- |
@@ -29,6 +29,18 @@ Every game carries its complete rule card in the room, including objectives, sco
 | **Borg Fleet Engagement** | 2 + spectators | Each commander privately places a four-vessel fleet on an 8×8 grid, then scans one enemy coordinate per turn. Hits earn another scan; misses pass control. The first commander to destroy every enemy vessel wins. |
 
 The five additions share the existing PeerJS room connection: a host starts a room, remote players follow the invitation link, and the host browser holds the authoritative state during play. Fleet Engagement additionally sends each guest a view with the opposing fleet positions masked.
+
+## Solo Deck and computer opponents
+
+The landing page also includes five games that start immediately in the player's browser. They do not use a room code, PeerJS, or a host tab. Best scores and victories are saved in that browser's local storage.
+
+| Game | Mode | Design and rules |
+| --- | --- | --- |
+| **Falling Block Skirmish: Solo** | Solo score attack | Move, rotate, and hard-drop twelve blocks into a personal 10×14 grid. Each block earns 10 points; cleared lines earn 100. Clear five lines to finish early or record your score after block twelve. |
+| **Shield Breaker Fleet: Solo** | Solo precision | Fire up to twelve deterministic nanoprobes through a personal shield wall. Each probe breaks every intact block on its bounce path. Clear all 30 blocks or preserve the highest break count. |
+| **Tile Matrix: Solitaire** | Solo matching | Remove exposed matching pairs from a personal 4×8 tile wall. A tile is exposed if its left or right neighbor is clear. Recalibrating shuffles the remaining tiles and costs one point. |
+| **Borg Chess: Computer Opponent** | You versus computer | Command White against a local Borg tactical routine. Standard movement, check, checkmate, stalemate, and automatic queen promotion apply; castling and en passant are omitted. The computer prioritizes captures, checks, and central control. |
+| **Borg Fleet Engagement: Computer Opponent** | You versus computer | Privately deploy four vessels, then take the first scan against a locally generated Borg fleet. Hits earn another scan; misses hand control to the computer. The computer searches around confirmed hits and otherwise scans untested coordinates. |
 
 ## Run it locally
 

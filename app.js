@@ -117,6 +117,49 @@
     },
   };
 
+  const SOLO_META = {
+    blocks: {
+      name: "Falling Block Skirmish: Solo",
+      label: "Falling Block Skirmish",
+      players: "solo score attack",
+      summary: "Place twelve polyominoes and clear as many Borg matrix lines as possible.",
+      rule: "Move, rotate, then hard-drop twelve blocks. Each block is worth 10 points and each cleared line adds 100. Clearing five lines completes the simulation early.",
+      record: "high score",
+    },
+    breaker: {
+      name: "Shield Breaker Fleet: Solo",
+      label: "Shield Breaker Fleet",
+      players: "solo precision",
+      summary: "Use twelve deterministic nanoprobes to break your shield wall.",
+      rule: "Choose a launch lane for each of twelve probes. Each follows its visible bounce path and breaks every intact shield block it crosses. Clear all 30 blocks or post the highest score you can.",
+      record: "high score",
+    },
+    tiles: {
+      name: "Tile Matrix: Solitaire",
+      label: "Tile Matrix",
+      players: "solo matching",
+      summary: "Match exposed Borg tiles from a personal matrix.",
+      rule: "Select two exposed matching tiles to remove them. A tile is exposed when its left or right neighbor is clear. You may recalibrate the remaining tiles, but each recalibration costs one point.",
+      record: "pairs cleared",
+    },
+    chess: {
+      name: "Borg Chess: Computer Opponent",
+      label: "Borg Chess vs Computer",
+      players: "you vs computer",
+      summary: "Command White against a tactical Borg opponent.",
+      rule: "You command White and move first. Pieces use standard movement; check, checkmate, stalemate, and automatic queen promotion apply. Castling and en passant are omitted in this rapid variant.",
+      record: "victories",
+    },
+    fleet: {
+      name: "Borg Fleet Engagement: Computer Opponent",
+      label: "Fleet Engagement vs Computer",
+      players: "you vs computer",
+      summary: "Deploy a private fleet, then outscan a Borg tactical routine.",
+      rule: "Place four vessels on your private sector grid. Scan one enemy coordinate per turn. A hit earns another scan; a miss gives the computer a scan. Sink every enemy vessel to win.",
+      record: "victories",
+    },
+  };
+
   const session = {
     peer: null,
     hostConnection: null,
@@ -130,7 +173,11 @@
     connected: false,
     error: "",
   };
-  const ui = { adaptMode: false, matrixDraft: [], matrixRound: null, interceptDraft: [], chessFrom: null, fleetShip: 0, fleetHorizontal: true };
+  const solo = { game: null, timers: [] };
+  const ui = {
+    adaptMode: false, matrixDraft: [], matrixRound: null, interceptDraft: [], chessFrom: null, fleetShip: 0, fleetHorizontal: true,
+    soloChessFrom: null, soloFleetShip: 0, soloFleetHorizontal: true,
+  };
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#039;", '"': "&quot;" })[char]);
   const shuffle = (items) => [...items].sort(() => Math.random() - 0.5);
@@ -1030,10 +1077,415 @@
     broadcast();
   }
 
+  function soloStore() {
+    try { return JSON.parse(window.localStorage.getItem("unimatrix-solo-records-v1") || "{}"); } catch { return {}; }
+  }
+
+  function soloRecord(type) {
+    return Number(soloStore()[type] || 0);
+  }
+
+  function saveSoloRecord(type, value) {
+    try {
+      const records = soloStore();
+      records[type] = value;
+      window.localStorage.setItem("unimatrix-solo-records-v1", JSON.stringify(records));
+    } catch { /* Local play continues when storage is unavailable. */ }
+  }
+
+  function soloRecordLabel(type) {
+    const value = soloRecord(type);
+    if (type === "chess" || type === "fleet") return `${value} ${value === 1 ? "victory" : "victories"} saved`;
+    return `best ${value}`;
+  }
+
+  function scheduleSolo(fn, delay) {
+    const timer = window.setTimeout(() => {
+      solo.timers = solo.timers.filter((item) => item !== timer);
+      fn();
+    }, delay);
+    solo.timers.push(timer);
+  }
+
+  function clearSoloTimers() {
+    solo.timers.forEach((timer) => window.clearTimeout(timer));
+    solo.timers = [];
+  }
+
+  function finishSolo(game, outcome, playerWon = false) {
+    if (game.phase === "complete") return;
+    game.phase = "complete";
+    game.outcome = outcome;
+    if (game.recorded) return;
+    game.recorded = true;
+    if (["blocks", "breaker", "tiles"].includes(game.type)) {
+      saveSoloRecord(game.type, Math.max(soloRecord(game.type), game.score));
+    } else if (playerWon) {
+      saveSoloRecord(game.type, soloRecord(game.type) + 1);
+    }
+  }
+
+  function startSolo(type) {
+    if (!SOLO_META[type]) return;
+    clearSoloTimers();
+    ui.soloChessFrom = null;
+    ui.soloFleetShip = 0;
+    ui.soloFleetHorizontal = true;
+    if (type === "blocks") solo.game = { type, phase: "playing", board: Array(140).fill(null), piece: newBlock(), score: 0, lines: 0, drops: 0, lastResult: "Move, rotate, then hard-drop your first polyomino." };
+    if (type === "breaker") solo.game = { type, phase: "playing", wall: Array(30).fill(true), score: 0, shots: 0, lastPath: [], lastResult: "Choose a launch lane for your first nanoprobe." };
+    if (type === "tiles") solo.game = { type, phase: "playing", wall: shuffle(TILE_SIGNS.flatMap((sign) => [sign, sign])), score: 0, selected: [], recalibrations: 0, lastResult: "Choose two exposed matching tiles." };
+    if (type === "chess") solo.game = { type, phase: "playing", board: createChessBoard(), turn: "w", history: [], lastResult: "You command White. Select a piece, then a legal destination." };
+    if (type === "fleet") solo.game = {
+      type, phase: "placement", turn: "player", ownBoard: Array(64).fill(null), computerBoard: Array(64).fill(null), ownFleet: [], computerFleet: [], ownShots: Array(64).fill(null), computerShots: Array(64).fill(null), lastResult: "Deploy every vessel before the Borg tactical routine begins scanning.",
+    };
+    render();
+  }
+
+  function leaveSolo() {
+    clearSoloTimers();
+    solo.game = null;
+    ui.soloChessFrom = null;
+    render();
+  }
+
+  function soloBlockMove(dx) {
+    const game = solo.game;
+    if (!game || game.type !== "blocks" || game.phase !== "playing" || ![-1, 1].includes(dx)) return;
+    const candidate = { ...game.piece, x: game.piece.x + dx };
+    if (validBlock(game.board, candidate)) game.piece = candidate;
+    render();
+  }
+
+  function soloBlockRotate() {
+    const game = solo.game;
+    if (!game || game.type !== "blocks" || game.phase !== "playing") return;
+    const candidate = { ...game.piece, rotation: (game.piece.rotation + 1) % 4 };
+    if (validBlock(game.board, candidate)) game.piece = candidate;
+    render();
+  }
+
+  function soloBlockDrop() {
+    const game = solo.game;
+    if (!game || game.type !== "blocks" || game.phase !== "playing" || !game.piece) return;
+    let piece = game.piece;
+    while (validBlock(game.board, { ...piece, y: piece.y + 1 })) piece = { ...piece, y: piece.y + 1 };
+    blockIndexes(piece).forEach((index) => { game.board[index] = "block"; });
+    const cleared = clearBlockRows(game.board);
+    game.drops += 1;
+    game.lines += cleared;
+    game.score += 10 + cleared * 100;
+    game.lastResult = cleared ? `You clear ${cleared} line${cleared === 1 ? "" : "s"}.` : "Block locked. Continue the construction.";
+    if (game.lines >= 5) finishSolo(game, `Matrix stabilized: five lines cleared for ${game.score} points.`);
+    else if (game.drops >= 12) finishSolo(game, `Twelve blocks placed. Final score: ${game.score}.`);
+    else {
+      const next = newBlock();
+      if (validBlock(game.board, next)) game.piece = next;
+      else finishSolo(game, `The matrix has no space for another block. Final score: ${game.score}.`);
+    }
+    render();
+  }
+
+  function soloBreakerFire(lane) {
+    const game = solo.game;
+    if (!game || game.type !== "breaker" || game.phase !== "playing" || !Number.isInteger(lane) || lane < 0 || lane > 5) return;
+    const path = breakerPath(lane, game.shots);
+    let broken = 0;
+    path.forEach((index) => { if (game.wall[index]) { game.wall[index] = false; broken += 1; } });
+    game.score += broken;
+    game.shots += 1;
+    game.lastPath = path;
+    game.lastResult = `Nanoprobe through lane ${lane + 1} breaks ${broken} block${broken === 1 ? "" : "s"}.`;
+    if (game.wall.every((cell) => !cell)) finishSolo(game, `Every shield block is down. Final score: ${game.score}.`);
+    else if (game.shots >= 12) finishSolo(game, `Twelve probes expended. Final score: ${game.score} blocks broken.`);
+    render();
+  }
+
+  function soloTilePick(index) {
+    const game = solo.game;
+    if (!game || game.type !== "tiles" || game.phase !== "playing" || !tileAvailable(game.wall, index) || game.selected.includes(index)) return;
+    game.selected.push(index);
+    if (game.selected.length === 1) {
+      game.lastResult = "Tile selected. Choose its exposed match.";
+      render();
+      return;
+    }
+    const [first, second] = game.selected;
+    if (game.wall[first] === game.wall[second]) {
+      game.wall[first] = null;
+      game.wall[second] = null;
+      game.score += 1;
+      game.lastResult = "Pair matched. Continue the matrix.";
+      if (game.wall.every((tile) => !tile)) finishSolo(game, `The Tile Matrix is clear: ${game.score} pairs recovered.`);
+    } else {
+      game.lastResult = "Those tiles do not match. Try another exposed pair.";
+    }
+    game.selected = [];
+    render();
+  }
+
+  function recalibrateSoloTiles() {
+    const game = solo.game;
+    if (!game || game.type !== "tiles" || game.phase !== "playing") return;
+    const remaining = shuffle(game.wall.filter(Boolean));
+    let cursor = 0;
+    game.wall = game.wall.map((tile) => tile ? remaining[cursor++] : null);
+    game.selected = [];
+    game.recalibrations += 1;
+    game.score = Math.max(0, game.score - 1);
+    game.lastResult = "The remaining tiles recalibrated. One point was spent.";
+    render();
+  }
+
+  function chessMoves(board, side) {
+    const moves = [];
+    board.forEach((piece, from) => {
+      if (chessSide(piece) !== side) return;
+      board.forEach((_, to) => { if (legalChessMove(board, from, to, side)) moves.push({ from, to }); });
+    });
+    return moves;
+  }
+
+  function finishSoloChessTurn(game, side, from, to) {
+    const moved = game.board[from];
+    const captured = game.board[to];
+    game.board = applyChessMove(game.board, from, to);
+    game.history.unshift({ side, from, to, moved, captured });
+    const nextSide = side === "w" ? "b" : "w";
+    const check = chessInCheck(game.board, nextSide);
+    if (!chessHasMove(game.board, nextSide)) {
+      if (check) finishSolo(game, side === "w" ? "Checkmate. You adapted beyond the Borg tactical routine." : "Checkmate. The Borg tactical routine controls the board.", side === "w");
+      else finishSolo(game, "The chess simulation ends in stalemate.");
+      return;
+    }
+    game.turn = nextSide;
+    const square = `${String.fromCharCode(97 + chessCol(to))}${8 - chessRow(to)}`;
+    game.lastResult = `${side === "w" ? "You" : "The Borg routine"} move ${CHESS_GLYPHS[moved]} to ${square}${captured ? ` and capture ${CHESS_GLYPHS[captured]}` : ""}.${check ? " Check." : ""}`;
+  }
+
+  function soloChessMove(from, to) {
+    const game = solo.game;
+    if (!game || game.type !== "chess" || game.phase !== "playing" || game.turn !== "w" || !legalChessMove(game.board, from, to, "w")) return;
+    finishSoloChessTurn(game, "w", from, to);
+    ui.soloChessFrom = null;
+    render();
+    if (game.phase === "playing" && game.turn === "b") scheduleSolo(soloComputerChessMove, 520);
+  }
+
+  function soloComputerChessMove() {
+    const game = solo.game;
+    if (!game || game.type !== "chess" || game.phase !== "playing" || game.turn !== "b") return;
+    const values = { P: 1, N: 3, B: 3, R: 5, Q: 9, K: 50 };
+    const candidates = chessMoves(game.board, "b");
+    if (!candidates.length) return;
+    const ranked = candidates.map((move) => {
+      const captured = game.board[move.to];
+      const next = applyChessMove(game.board, move.from, move.to);
+      const center = 4 - Math.abs(3.5 - chessCol(move.to)) - Math.abs(3.5 - chessRow(move.to));
+      return { ...move, score: (captured ? values[chessKind(captured)] * 20 : 0) + (chessInCheck(next, "w") ? 7 : 0) + center + Math.random() * 2 };
+    }).sort((first, second) => second.score - first.score);
+    const pick = ranked[0];
+    finishSoloChessTurn(game, "b", pick.from, pick.to);
+    render();
+  }
+
+  function soloPlaceFleetShip(board, fleet, shipIndex, index, horizontal) {
+    if (!FLEET_SHIPS[shipIndex] || fleet.some((ship) => ship.index === shipIndex)) return false;
+    const cells = fleetCells(index, FLEET_SHIPS[shipIndex].size, horizontal);
+    if (!cells || cells.some((cell) => board[cell])) return false;
+    cells.forEach((cell) => { board[cell] = `ship-${shipIndex}`; });
+    fleet.push({ index: shipIndex, label: FLEET_SHIPS[shipIndex].label, size: FLEET_SHIPS[shipIndex].size, cells, hits: 0 });
+    return true;
+  }
+
+  function deployComputerFleet(game) {
+    FLEET_SHIPS.forEach((ship, index) => {
+      let placed = false;
+      for (let attempt = 0; attempt < 300 && !placed; attempt += 1) {
+        placed = soloPlaceFleetShip(game.computerBoard, game.computerFleet, index, Math.floor(Math.random() * 64), Math.random() >= 0.5);
+      }
+    });
+  }
+
+  function soloFleetPlace(index) {
+    const game = solo.game;
+    if (!game || game.type !== "fleet" || game.phase !== "placement") return;
+    if (!soloPlaceFleetShip(game.ownBoard, game.ownFleet, ui.soloFleetShip, index, ui.soloFleetHorizontal)) return;
+    const remaining = FLEET_SHIPS.findIndex((ship, shipIndex) => !game.ownFleet.some((placed) => placed.index === shipIndex));
+    if (remaining >= 0) {
+      ui.soloFleetShip = remaining;
+      game.lastResult = `${FLEET_SHIPS[ui.soloFleetShip].label} awaits deployment.`;
+    } else {
+      deployComputerFleet(game);
+      game.phase = "playing";
+      game.turn = "player";
+      game.lastResult = "Both fleets are deployed. You have the first scan.";
+    }
+    render();
+  }
+
+  function soloFleetScan(game, attacker, index) {
+    const targetBoard = attacker === "player" ? game.computerBoard : game.ownBoard;
+    const targetFleet = attacker === "player" ? game.computerFleet : game.ownFleet;
+    const shots = attacker === "player" ? game.ownShots : game.computerShots;
+    if (shots[index]) return null;
+    const vessel = targetBoard[index];
+    const hit = Boolean(vessel);
+    shots[index] = hit ? "hit" : "miss";
+    let sunk = null;
+    if (hit) {
+      const ship = targetFleet.find((item) => `ship-${item.index}` === vessel);
+      ship.hits += 1;
+      if (ship.hits === ship.size) sunk = ship.label;
+    }
+    if (targetFleet.every((ship) => ship.hits >= ship.size)) {
+      finishSolo(game, attacker === "player" ? "Every Borg vessel is destroyed. Fleet Engagement is yours." : "The Borg tactical routine destroys your fleet.", attacker === "player");
+      return { hit, sunk, finished: true };
+    }
+    return { hit, sunk, finished: false };
+  }
+
+  function soloFleetFire(index) {
+    const game = solo.game;
+    if (!game || game.type !== "fleet" || game.phase !== "playing" || game.turn !== "player" || game.ownShots[index]) return;
+    const result = soloFleetScan(game, "player", index);
+    if (!result) return;
+    if (!result.finished && result.hit) game.lastResult = `Hit confirmed${result.sunk ? `: ${result.sunk} destroyed` : ""}. Scan again.`;
+    if (!result.finished && !result.hit) {
+      game.turn = "computer";
+      game.lastResult = "Scan missed. The Borg tactical routine is calculating a response.";
+    }
+    render();
+    if (!result.finished && !result.hit) scheduleSolo(soloComputerFleetTurn, 520);
+  }
+
+  function computerFleetTarget(game) {
+    const candidates = [];
+    game.computerShots.forEach((shot, index) => {
+      if (shot !== "hit") return;
+      const row = Math.floor(index / 8); const col = index % 8;
+      [[row - 1, col], [row + 1, col], [row, col - 1], [row, col + 1]].forEach(([nextRow, nextCol]) => {
+        const next = nextRow * 8 + nextCol;
+        if (nextRow >= 0 && nextRow < 8 && nextCol >= 0 && nextCol < 8 && !game.computerShots[next]) candidates.push(next);
+      });
+    });
+    const unscanned = game.computerShots.map((shot, index) => shot ? null : index).filter((index) => index !== null);
+    const choices = candidates.length ? candidates : unscanned;
+    return choices[Math.floor(Math.random() * choices.length)];
+  }
+
+  function soloComputerFleetTurn() {
+    const game = solo.game;
+    if (!game || game.type !== "fleet" || game.phase !== "playing" || game.turn !== "computer") return;
+    const index = computerFleetTarget(game);
+    const result = soloFleetScan(game, "computer", index);
+    if (!result) return;
+    if (!result.finished && result.hit) {
+      game.lastResult = `The Borg routine records a hit${result.sunk ? ` and destroys your ${result.sunk}` : ""}. It scans again.`;
+      render();
+      scheduleSolo(soloComputerFleetTurn, 520);
+      return;
+    }
+    if (!result.finished) {
+      game.turn = "player";
+      game.lastResult = "The Borg scan missed. Your sector is ready for the next command.";
+    }
+    render();
+  }
+
+  function soloComplete(game) {
+    if (game.phase !== "complete") return "";
+    return `<div class="result"><strong>Solo simulation complete</strong><br>${escapeHtml(game.outcome || "")}</div><div class="host-tools" style="margin-top:16px"><button class="action" data-action="solo-restart">Run again</button><button class="secondary" data-action="solo-lobby">Solo Deck</button></div>`;
+  }
+
+  function renderSoloShell(content) {
+    const game = solo.game;
+    const meta = SOLO_META[game.type];
+    return `<section class="panel"><div class="game-header"><div><div class="brand">Local solo simulation</div><h2>${escapeHtml(meta.name)}</h2><p>${escapeHtml(meta.players)}</p></div><div class="scoreboard"><span class="score">Saved record: ${escapeHtml(soloRecordLabel(game.type))}</span></div></div><div class="rulebox">${escapeHtml(meta.rule)}</div>${content}${game.phase !== "complete" ? '<div class="host-tools" style="margin-top:22px"><button class="secondary" data-action="solo-lobby">Leave Solo Deck</button></div>' : ""}</section>`;
+  }
+
+  function renderSoloBlocks() {
+    const game = solo.game;
+    const active = new Set(game.piece ? blockIndexes(game.piece) : []);
+    const grid = game.board.map((cell, index) => `<span class="block-cell ${cell ? "locked" : ""} ${active.has(index) ? "falling" : ""}"></span>`).join("");
+    const controls = game.phase === "playing" ? '<div class="host-tools block-controls"><button class="secondary" data-action="solo-block-move" data-dx="-1">◀ Move</button><button class="secondary" data-action="solo-block-rotate">↻ Rotate</button><button class="secondary" data-action="solo-block-move" data-dx="1">Move ▶</button><button class="action" data-action="solo-block-drop">Hard drop</button></div>' : "";
+    return renderSoloShell(`<div class="center"><div class="brand">Personal construction matrix</div><p class="hint">${game.drops}/12 blocks • ${game.lines}/5 lines • ${game.score} points</p><div class="block-board">${grid}</div>${controls}</div><p class="helper">${escapeHtml(game.lastResult)}</p>${soloComplete(game)}`);
+  }
+
+  function renderSoloBreaker() {
+    const game = solo.game;
+    const wall = game.wall.map((brick, index) => `<span class="brick ${brick ? "intact" : "broken"} ${game.lastPath.includes(index) ? "path" : ""}"></span>`).join("");
+    const lanes = Array.from({ length: 6 }, (_, lane) => `<button class="glyph" data-action="solo-breaker-fire" data-lane="${lane}" ${game.phase !== "playing" ? "disabled" : ""}>${lane + 1}</button>`).join("");
+    return renderSoloShell(`<div class="center"><div class="brand">Personal shield wall</div><p class="hint">${game.shots}/12 probes • ${game.score} blocks broken</p><div class="breaker-board">${wall}</div><div class="glyphs launch-lanes">${lanes}</div></div><p class="helper">${escapeHtml(game.lastResult)}</p>${soloComplete(game)}`);
+  }
+
+  function renderSoloTiles() {
+    const game = solo.game;
+    const tiles = game.wall.map((tile, index) => {
+      const open = tileAvailable(game.wall, index);
+      return `<button class="tile ${tile ? "" : "cleared"} ${open ? "exposed" : ""} ${game.selected.includes(index) ? "selected-choice" : ""}" data-action="solo-tile-pick" data-index="${index}" ${!tile || !open || game.phase !== "playing" ? "disabled" : ""}>${tile || ""}</button>`;
+    }).join("");
+    return renderSoloShell(`<div class="center"><div class="brand">Personal tile matrix</div><p class="hint">${game.score} pairs cleared • ${game.recalibrations} recalibrations</p><div class="tile-wall">${tiles}</div><button class="secondary" data-action="solo-tile-recalibrate" ${game.phase !== "playing" ? "disabled" : ""}>Recalibrate remaining tiles (−1 point)</button></div><p class="helper">${escapeHtml(game.lastResult)}</p>${soloComplete(game)}`);
+  }
+
+  function renderSoloChess() {
+    const game = solo.game;
+    const canMove = game.phase === "playing" && game.turn === "w";
+    if (!canMove) ui.soloChessFrom = null;
+    const squares = game.board.map((piece, index) => {
+      const selected = ui.soloChessFrom === index;
+      const legal = ui.soloChessFrom !== null && canMove && legalChessMove(game.board, ui.soloChessFrom, index, "w");
+      const color = (chessRow(index) + chessCol(index)) % 2 ? "dark" : "light";
+      return `<button class="chess-square ${color} ${selected ? "selected-choice" : ""} ${legal ? "legal" : ""}" data-action="solo-chess-square" data-index="${index}" ${!canMove ? "disabled" : ""}>${piece ? CHESS_GLYPHS[piece] : ""}</button>`;
+    }).join("");
+    const status = game.phase === "complete" ? "Board archive" : game.turn === "w" ? "Your command: select a White piece, then a legal destination." : "The Borg tactical routine is considering its response…";
+    return renderSoloShell(`<div class="center"><div class="brand">Rapid chess board</div><p class="hint">${status}</p><div class="chess-board">${squares}</div></div><p class="helper">${escapeHtml(game.lastResult)}</p>${soloComplete(game)}`);
+  }
+
+  function soloFleetGrid(board, shots, enemy, interactive) {
+    return board.map((vessel, index) => {
+      const shot = shots[index];
+      const classes = ["fleet-cell"];
+      if (!enemy && vessel) classes.push("vessel");
+      if (shot) classes.push(shot);
+      return `<button class="${classes.join(" ")}" data-action="solo-fleet-cell" data-index="${index}" ${!interactive ? "disabled" : ""}>${shot === "hit" ? "✦" : shot === "miss" ? "·" : !enemy && vessel ? "◆" : ""}</button>`;
+    }).join("");
+  }
+
+  function renderSoloFleet() {
+    const game = solo.game;
+    if (game.phase === "placement") {
+      const remaining = FLEET_SHIPS.filter((ship, index) => !game.ownFleet.some((placed) => placed.index === index));
+      if (remaining.length && !remaining.some((ship) => FLEET_SHIPS.indexOf(ship) === ui.soloFleetShip)) ui.soloFleetShip = FLEET_SHIPS.indexOf(remaining[0]);
+      const ships = FLEET_SHIPS.map((ship, index) => {
+        const placed = game.ownFleet.some((item) => item.index === index);
+        return `<button class="${ui.soloFleetShip === index ? "action" : "secondary"}" data-action="solo-fleet-select" data-ship="${index}" ${placed ? "disabled" : ""}>${escapeHtml(ship.label)} • ${ship.size}</button>`;
+      }).join("");
+      return renderSoloShell(`<div class="center"><div class="brand">Private fleet deployment</div><p class="hint">Select a vessel, choose an orientation, then select its starting cell.</p><div class="host-tools" style="justify-content:center">${ships}<button class="secondary" data-action="solo-fleet-orientation">${ui.soloFleetHorizontal ? "Horizontal" : "Vertical"}</button></div><div class="fleet-board">${soloFleetGrid(game.ownBoard, game.computerShots, false, true)}</div></div><p class="helper">${escapeHtml(game.lastResult)}</p>`);
+    }
+    const canFire = game.phase === "playing" && game.turn === "player";
+    const enemy = soloFleetGrid(game.computerBoard, game.ownShots, true, canFire);
+    const own = soloFleetGrid(game.ownBoard, game.computerShots, false, false);
+    return renderSoloShell(`<div class="fleet-layout"><section><div class="brand">Enemy sector</div><div class="fleet-board">${enemy}</div></section><section><div class="brand">Your sector</div><div class="fleet-board">${own}</div></section></div><p class="helper center">${escapeHtml(game.lastResult)}</p>${soloComplete(game)}`);
+  }
+
+  function renderSolo() {
+    const game = solo.game;
+    const header = '<header class="topbar"><div><div class="brand">Unimatrix Social Deck</div><h1>Solo Deck</h1></div><div class="connection"><span class="status">● local simulation</span><br><span>no room code required</span></div></header>';
+    const body = game.type === "blocks" ? renderSoloBlocks()
+      : game.type === "breaker" ? renderSoloBreaker()
+      : game.type === "tiles" ? renderSoloTiles()
+      : game.type === "chess" ? renderSoloChess()
+      : renderSoloFleet();
+    return header + body;
+  }
+
   function renderLanding() {
     const queryRoom = new URLSearchParams(window.location.search).get("room") || "";
     const cards = Object.entries(META).map(([key, meta]) => `
       <article class="game-card"><strong>${escapeHtml(meta.name)}</strong><p>${escapeHtml(meta.summary)}</p><span class="pill">${escapeHtml(meta.players)}</span></article>
+    `).join("");
+    const soloCards = Object.entries(SOLO_META).map(([key, meta]) => `
+      <button class="solo-card" data-action="solo-start" data-game="${key}"><strong>${escapeHtml(meta.label)}</strong><p>${escapeHtml(meta.summary)}</p><span class="pill">${escapeHtml(meta.players)}</span><small>Saved record: ${escapeHtml(soloRecordLabel(key))}</small></button>
     `).join("");
     return `
       <section class="hero">
@@ -1056,6 +1508,9 @@
       <section class="catalogue">
         <div class="section-heading"><h2>Available simulations</h2><span>Rules appear inside every room</span></div>
         <div class="game-grid">${cards}</div>
+        <div class="section-heading solo-heading"><h2>Solo Deck</h2><span>Play immediately on this device</span></div>
+        <div class="solo-grid">${soloCards}</div>
+        <p class="helper">Solo records are stored in this browser. Chess and Fleet Engagement include a local Borg computer opponent.</p>
       </section>`;
   }
 
@@ -1281,6 +1736,10 @@
   }
 
   function render() {
+    if (solo.game) {
+      app.innerHTML = renderSolo();
+      return;
+    }
     if (!session.state) {
       app.innerHTML = renderLanding();
       return;
@@ -1309,6 +1768,35 @@
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.action;
+    if (action === "solo-start") { startSolo(button.dataset.game); return; }
+    if (action === "solo-lobby") { leaveSolo(); return; }
+    if (action === "solo-restart") { startSolo(solo.game?.type); return; }
+    if (action === "solo-block-move") { soloBlockMove(Number(button.dataset.dx)); return; }
+    if (action === "solo-block-rotate") { soloBlockRotate(); return; }
+    if (action === "solo-block-drop") { soloBlockDrop(); return; }
+    if (action === "solo-breaker-fire") { soloBreakerFire(Number(button.dataset.lane)); return; }
+    if (action === "solo-tile-pick") { soloTilePick(Number(button.dataset.index)); return; }
+    if (action === "solo-tile-recalibrate") { recalibrateSoloTiles(); return; }
+    if (action === "solo-chess-square") {
+      const game = solo.game; const index = Number(button.dataset.index);
+      if (!game || game.turn !== "w") return;
+      if (ui.soloChessFrom === null) {
+        if (chessSide(game.board[index]) === "w") { ui.soloChessFrom = index; render(); }
+      } else if (chessSide(game.board[index]) === "w") {
+        ui.soloChessFrom = index; render();
+      } else {
+        soloChessMove(ui.soloChessFrom, index);
+      }
+      return;
+    }
+    if (action === "solo-fleet-select") { ui.soloFleetShip = Number(button.dataset.ship); render(); return; }
+    if (action === "solo-fleet-orientation") { ui.soloFleetHorizontal = !ui.soloFleetHorizontal; render(); return; }
+    if (action === "solo-fleet-cell") {
+      const game = solo.game; const index = Number(button.dataset.index);
+      if (game?.phase === "placement") soloFleetPlace(index);
+      else soloFleetFire(index);
+      return;
+    }
     if (action === "create" || action === "join") {
       const name = cleanName(getInput("#player-name"));
       const room = getInput("#room-code").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
