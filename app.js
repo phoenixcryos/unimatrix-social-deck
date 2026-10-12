@@ -83,8 +83,8 @@
     blocks: {
       name: "Falling Block Skirmish",
       players: "2–10 • score race",
-      summary: "Build, rotate, and drop polyominoes to clear a Borg matrix.",
-      rule: "Every drone has a 10×14 matrix and twelve blocks. Move, rotate, then hard-drop your active block. Each cleared horizontal line is worth 100 points. Clear five lines to win, or lead on points after every drone places twelve blocks.",
+      summary: "A continuous falling-block race across individual Borg matrices.",
+      rule: "Every drone has a 10×14 matrix. Polyominoes fall automatically. Move, rotate, soft-drop, or hard-drop the active block. Lines score 100, 300, 500, or 800 points for a one-, two-, three-, or four-line clear. Your run ends when a new block cannot enter the matrix; the last active drone wins, or the high score wins after every matrix locks out.",
       min: 2,
     },
     breaker: {
@@ -121,9 +121,9 @@
     blocks: {
       name: "Falling Block Skirmish: Solo",
       label: "Falling Block Skirmish",
-      players: "solo score attack",
-      summary: "Place twelve polyominoes and clear as many Borg matrix lines as possible.",
-      rule: "Move, rotate, then hard-drop twelve blocks. Each block is worth 10 points and each cleared line adds 100. Clearing five lines completes the simulation early.",
+      players: "solo endless score attack",
+      summary: "A continuous falling-block run that ends only when the matrix fills.",
+      rule: "Polyominoes fall automatically. Move, rotate, soft-drop, or hard-drop each block. Lines score 100, 300, 500, or 800 points for a one-, two-, three-, or four-line clear. Keep the matrix open for as long as you can.",
       record: "high score",
     },
     breaker: {
@@ -241,6 +241,10 @@
       fn();
     }, delay);
     session.timers.push(timer);
+  }
+
+  function lineClearScore(cleared) {
+    return [0, 100, 300, 500, 800][cleared] || 0;
   }
 
   function clearTimers() {
@@ -430,6 +434,7 @@
     if (game.type === "intercept" && action.type === "interceptGuess") submitIntercept(playerId, action.value);
     if (game.type === "blocks" && action.type === "blockMove") moveBlock(playerId, Number(action.dx));
     if (game.type === "blocks" && action.type === "blockRotate") rotateBlock(playerId);
+    if (game.type === "blocks" && action.type === "blockSoftDrop") softDropBlock(playerId);
     if (game.type === "blocks" && action.type === "blockDrop") dropBlock(playerId);
     if (game.type === "breaker" && action.type === "breakerFire") fireBreaker(playerId, Number(action.lane));
     if (game.type === "tiles" && action.type === "tilePick") pickTile(playerId, Number(action.index));
@@ -739,17 +744,69 @@
       drops[id] = 0;
       finished[id] = false;
     });
-    Object.assign(game, { boards, pieces, scores, lines, drops, finished, lastResult: "Move, rotate, then hard-drop your first polyomino." });
+    Object.assign(game, { boards, pieces, scores, lines, drops, finished, lastResult: "The first polyominoes are descending. Keep your matrix open." });
+    scheduleBlockTick();
   }
 
   function finishBlocks(game, winnerId) {
     game.phase = "complete";
-    if (winnerId) game.outcome = `${nameOf(winnerId)} clears five lines and wins the skirmish.`;
+    clearTimers();
+    if (winnerId) game.outcome = `${nameOf(winnerId)} is the last drone with an open matrix and wins the skirmish.`;
     else {
       const high = Math.max(...Object.values(game.scores));
       const winners = game.active.filter((id) => game.scores[id] === high).map(nameOf);
       game.outcome = winners.length === 1 ? `${winners[0]} wins on ${high} points.` : `The skirmish ends tied: ${winners.join(" and ")} each have ${high} points.`;
     }
+  }
+
+  function scheduleBlockTick() {
+    schedule(() => {
+      const game = currentGame();
+      if (!game || game.type !== "blocks" || game.phase !== "playing") return;
+      let changed = false;
+      game.active.forEach((id) => { changed = advanceBlock(game, id) || changed; });
+      if (changed) broadcast();
+      if (game.phase === "playing") scheduleBlockTick();
+    }, 800);
+  }
+
+  function resolveBlockLockout(game) {
+    const survivors = game.active.filter((id) => !game.finished[id]);
+    if (survivors.length === 1 && game.active.length > 1) finishBlocks(game, survivors[0]);
+    else if (survivors.length === 0) finishBlocks(game);
+  }
+
+  function settleBlock(game, playerId) {
+    const piece = game.pieces[playerId];
+    if (!piece) return false;
+    blockIndexes(piece).forEach((index) => { game.boards[playerId][index] = "block"; });
+    const cleared = clearBlockRows(game.boards[playerId]);
+    game.drops[playerId] += 1;
+    game.lines[playerId] += cleared;
+    game.scores[playerId] += lineClearScore(cleared);
+    game.lastResult = cleared
+      ? `${nameOf(playerId)} clears ${cleared} line${cleared === 1 ? "" : "s"} for ${lineClearScore(cleared)} points.`
+      : `${nameOf(playerId)} locks a block.`;
+    const next = newBlock();
+    if (validBlock(game.boards[playerId], next)) game.pieces[playerId] = next;
+    else {
+      game.finished[playerId] = true;
+      game.pieces[playerId] = null;
+      game.lastResult = `${nameOf(playerId)}'s matrix locks out on ${game.scores[playerId]} points.`;
+      resolveBlockLockout(game);
+    }
+    return true;
+  }
+
+  function advanceBlock(game, playerId) {
+    const piece = game.pieces[playerId];
+    if (game.phase !== "playing" || game.finished[playerId] || !piece) return false;
+    const candidate = { ...piece, y: piece.y + 1 };
+    if (validBlock(game.boards[playerId], candidate)) {
+      game.pieces[playerId] = candidate;
+      return true;
+    }
+    return settleBlock(game, playerId);
   }
 
   function moveBlock(playerId, dx) {
@@ -770,6 +827,12 @@
     broadcast();
   }
 
+  function softDropBlock(playerId) {
+    const game = currentGame();
+    if (!game || game.phase !== "playing" || game.finished[playerId]) return;
+    if (advanceBlock(game, playerId)) broadcast();
+  }
+
   function clearBlockRows(board) {
     let cleared = 0;
     for (let row = 13; row >= 0; row -= 1) {
@@ -788,23 +851,8 @@
     let piece = game.pieces[playerId];
     if (game.phase !== "playing" || game.finished[playerId] || !piece) return;
     while (validBlock(game.boards[playerId], { ...piece, y: piece.y + 1 })) piece = { ...piece, y: piece.y + 1 };
-    blockIndexes(piece).forEach((index) => { game.boards[playerId][index] = "block"; });
-    const cleared = clearBlockRows(game.boards[playerId]);
-    game.drops[playerId] += 1;
-    game.lines[playerId] += cleared;
-    game.scores[playerId] += 10 + cleared * 100;
-    game.lastResult = cleared ? `${nameOf(playerId)} clears ${cleared} line${cleared === 1 ? "" : "s"}.` : `${nameOf(playerId)} locks a block.`;
-    if (game.lines[playerId] >= 5) {
-      finishBlocks(game, playerId);
-    } else if (game.drops[playerId] >= 12) {
-      game.finished[playerId] = true;
-      game.pieces[playerId] = null;
-    } else {
-      const next = newBlock();
-      if (validBlock(game.boards[playerId], next)) game.pieces[playerId] = next;
-      else { game.finished[playerId] = true; game.pieces[playerId] = null; }
-    }
-    if (game.phase === "playing" && game.active.every((id) => game.finished[id])) finishBlocks(game);
+    game.pieces[playerId] = piece;
+    settleBlock(game, playerId);
     broadcast();
   }
 
@@ -1131,7 +1179,10 @@
     ui.soloChessFrom = null;
     ui.soloFleetShip = 0;
     ui.soloFleetHorizontal = true;
-    if (type === "blocks") solo.game = { type, phase: "playing", board: Array(140).fill(null), piece: newBlock(), score: 0, lines: 0, drops: 0, lastResult: "Move, rotate, then hard-drop your first polyomino." };
+    if (type === "blocks") {
+      solo.game = { type, phase: "playing", board: Array(140).fill(null), piece: newBlock(), score: 0, lines: 0, drops: 0, lastResult: "The first polyomino is descending. Keep the matrix open." };
+      scheduleSoloBlockTick();
+    }
     if (type === "breaker") solo.game = { type, phase: "playing", wall: Array(30).fill(true), score: 0, shots: 0, lastPath: [], lastResult: "Choose a launch lane for your first nanoprobe." };
     if (type === "tiles") solo.game = { type, phase: "playing", wall: shuffle(TILE_SIGNS.flatMap((sign) => [sign, sign])), score: 0, selected: [], recalibrations: 0, lastResult: "Choose two exposed matching tiles." };
     if (type === "chess") solo.game = { type, phase: "playing", board: createChessBoard(), turn: "w", history: [], lastResult: "You command White. Select a piece, then a legal destination." };
@@ -1164,24 +1215,52 @@
     render();
   }
 
+  function settleSoloBlock(game) {
+    const piece = game.piece;
+    if (!piece) return false;
+    blockIndexes(piece).forEach((index) => { game.board[index] = "block"; });
+    const cleared = clearBlockRows(game.board);
+    game.drops += 1;
+    game.lines += cleared;
+    game.score += lineClearScore(cleared);
+    game.lastResult = cleared
+      ? `You clear ${cleared} line${cleared === 1 ? "" : "s"} for ${lineClearScore(cleared)} points.`
+      : "Block locked. Keep the matrix open.";
+    const next = newBlock();
+    if (validBlock(game.board, next)) game.piece = next;
+    else finishSolo(game, `The matrix locks out after ${game.lines} cleared lines. Final score: ${game.score}.`);
+    return true;
+  }
+
+  function advanceSoloBlock() {
+    const game = solo.game;
+    if (!game || game.type !== "blocks" || game.phase !== "playing" || !game.piece) return false;
+    const candidate = { ...game.piece, y: game.piece.y + 1 };
+    if (validBlock(game.board, candidate)) {
+      game.piece = candidate;
+      return true;
+    }
+    return settleSoloBlock(game);
+  }
+
+  function scheduleSoloBlockTick() {
+    scheduleSolo(() => {
+      if (advanceSoloBlock()) render();
+      if (solo.game?.type === "blocks" && solo.game.phase === "playing") scheduleSoloBlockTick();
+    }, 800);
+  }
+
+  function soloBlockSoftDrop() {
+    if (advanceSoloBlock()) render();
+  }
+
   function soloBlockDrop() {
     const game = solo.game;
     if (!game || game.type !== "blocks" || game.phase !== "playing" || !game.piece) return;
     let piece = game.piece;
     while (validBlock(game.board, { ...piece, y: piece.y + 1 })) piece = { ...piece, y: piece.y + 1 };
-    blockIndexes(piece).forEach((index) => { game.board[index] = "block"; });
-    const cleared = clearBlockRows(game.board);
-    game.drops += 1;
-    game.lines += cleared;
-    game.score += 10 + cleared * 100;
-    game.lastResult = cleared ? `You clear ${cleared} line${cleared === 1 ? "" : "s"}.` : "Block locked. Continue the construction.";
-    if (game.lines >= 5) finishSolo(game, `Matrix stabilized: five lines cleared for ${game.score} points.`);
-    else if (game.drops >= 12) finishSolo(game, `Twelve blocks placed. Final score: ${game.score}.`);
-    else {
-      const next = newBlock();
-      if (validBlock(game.board, next)) game.piece = next;
-      else finishSolo(game, `The matrix has no space for another block. Final score: ${game.score}.`);
-    }
+    game.piece = piece;
+    settleSoloBlock(game);
     render();
   }
 
@@ -1407,8 +1486,8 @@
     const game = solo.game;
     const active = new Set(game.piece ? blockIndexes(game.piece) : []);
     const grid = game.board.map((cell, index) => `<span class="block-cell ${cell ? "locked" : ""} ${active.has(index) ? "falling" : ""}"></span>`).join("");
-    const controls = game.phase === "playing" ? '<div class="host-tools block-controls"><button class="secondary" data-action="solo-block-move" data-dx="-1">◀ Move</button><button class="secondary" data-action="solo-block-rotate">↻ Rotate</button><button class="secondary" data-action="solo-block-move" data-dx="1">Move ▶</button><button class="action" data-action="solo-block-drop">Hard drop</button></div>' : "";
-    return renderSoloShell(`<div class="center"><div class="brand">Personal construction matrix</div><p class="hint">${game.drops}/12 blocks • ${game.lines}/5 lines • ${game.score} points</p><div class="block-board">${grid}</div>${controls}</div><p class="helper">${escapeHtml(game.lastResult)}</p>${soloComplete(game)}`);
+    const controls = game.phase === "playing" ? '<div class="host-tools block-controls"><button class="secondary" data-action="solo-block-move" data-dx="-1">◀ Move</button><button class="secondary" data-action="solo-block-rotate">↻ Rotate</button><button class="secondary" data-action="solo-block-move" data-dx="1">Move ▶</button><button class="secondary" data-action="solo-block-soft-drop">▼ Soft drop</button><button class="action" data-action="solo-block-drop">Hard drop</button></div>' : "";
+    return renderSoloShell(`<div class="center"><div class="brand">Personal construction matrix</div><p class="hint">${game.drops} blocks • ${game.lines} lines • ${game.score} points</p><div class="block-board">${grid}</div>${controls}</div><p class="helper">${escapeHtml(game.lastResult)}</p>${soloComplete(game)}`);
   }
 
   function renderSoloBreaker() {
@@ -1662,8 +1741,8 @@
     const activeIndexes = new Set(activePiece ? blockIndexes(activePiece) : []);
     const grid = game.boards[boardId].map((cell, index) => `<span class="block-cell ${cell ? "locked" : ""} ${activeIndexes.has(index) ? "falling" : ""}"></span>`).join("");
     const canControl = game.phase === "playing" && boardId === session.meId && !game.finished[boardId];
-    const controls = canControl ? `<div class="host-tools block-controls"><button class="secondary" data-action="block-move" data-dx="-1">◀ Move</button><button class="secondary" data-action="block-rotate">↻ Rotate</button><button class="secondary" data-action="block-move" data-dx="1">Move ▶</button><button class="action" data-action="block-drop">Hard drop</button></div>` : "";
-    const status = game.finished[boardId] ? "Your matrix is complete." : `Block ${game.drops[boardId] + 1} of 12 • ${game.lines[boardId]}/5 lines`;
+    const controls = canControl ? `<div class="host-tools block-controls"><button class="secondary" data-action="block-move" data-dx="-1">◀ Move</button><button class="secondary" data-action="block-rotate">↻ Rotate</button><button class="secondary" data-action="block-move" data-dx="1">Move ▶</button><button class="secondary" data-action="block-soft-drop">▼ Soft drop</button><button class="action" data-action="block-drop">Hard drop</button></div>` : "";
+    const status = game.finished[boardId] ? `Matrix locked out • ${game.scores[boardId]} points` : `${game.drops[boardId]} blocks • ${game.lines[boardId]} lines • ${game.scores[boardId]} points`;
     return renderGameShell(`<div class="center"><div class="brand">${escapeHtml(nameOf(boardId))}'s construction matrix</div><p class="hint">${status}</p><div class="block-board">${grid}</div>${controls}</div><p class="helper">${escapeHtml(game.lastResult)}</p>${game.phase === "complete" ? completeBlock(game) : ""}`);
   }
 
@@ -1773,6 +1852,7 @@
     if (action === "solo-restart") { startSolo(solo.game?.type); return; }
     if (action === "solo-block-move") { soloBlockMove(Number(button.dataset.dx)); return; }
     if (action === "solo-block-rotate") { soloBlockRotate(); return; }
+    if (action === "solo-block-soft-drop") { soloBlockSoftDrop(); return; }
     if (action === "solo-block-drop") { soloBlockDrop(); return; }
     if (action === "solo-breaker-fire") { soloBreakerFire(Number(button.dataset.lane)); return; }
     if (action === "solo-tile-pick") { soloTilePick(Number(button.dataset.index)); return; }
@@ -1826,6 +1906,7 @@
     if (action === "intercept-submit") { sendAction({ type: "interceptGuess", value: ui.interceptDraft }); ui.interceptDraft = []; return; }
     if (action === "block-move") { sendAction({ type: "blockMove", dx: Number(button.dataset.dx) }); return; }
     if (action === "block-rotate") { sendAction({ type: "blockRotate" }); return; }
+    if (action === "block-soft-drop") { sendAction({ type: "blockSoftDrop" }); return; }
     if (action === "block-drop") { sendAction({ type: "blockDrop" }); return; }
     if (action === "breaker-fire") { sendAction({ type: "breakerFire", lane: Number(button.dataset.lane) }); return; }
     if (action === "tile-pick") { sendAction({ type: "tilePick", index: Number(button.dataset.index) }); return; }
