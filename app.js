@@ -1039,7 +1039,7 @@
       <section class="hero">
         <div class="brand">Borg themed Discord game room</div>
         <h1>UNIMATRIX<br><span class="accent">SOCIAL DECK</span></h1>
-        <p>Five quick multiplayer simulations for a collective that is never in the same room. One drone hosts; everyone joins the same link from their own device.</p>
+        <p>Ten multiplayer simulations for a collective that is never in the same room. One drone hosts; everyone joins the same link from their own device.</p>
       </section>
       <section class="panel">
         <div class="entry">
