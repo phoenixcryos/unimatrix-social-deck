@@ -18,6 +18,18 @@ https://phoenixcryos.github.io/unimatrix-social-deck/
 
 Every game carries its complete rule card in the room, including objectives, scoring, turn order, and end conditions.
 
+## Expansion deck: five new simulations
+
+| Game | Players | Design and rules |
+| --- | --- | --- |
+| **Falling Block Skirmish** | 2–10 | Each drone builds its own 10×14 matrix with falling polyominoes. Move, rotate, and hard-drop twelve blocks. Clear horizontal lines for 100 points each; the first drone to clear five lines wins, otherwise the highest score after every drone places twelve blocks wins. |
+| **Shield Breaker Fleet** | 2–10 | A turn-based brick-breaker race. On each turn, launch a nanoprobe through one of six lanes against your own 6×5 shield wall. The deterministic bounce path breaks blocks, and the first drone to clear its wall wins. The highest broken-block count after twelve shots each decides an unfinished match. |
+| **Tile Matrix** | 2–10 | A Mahjong-style open-edge matching puzzle. Players take turns selecting two identical exposed tiles from the shared wall. An exposed tile has an empty space immediately left or right. A matching pair scores 1 and keeps the turn; a mismatch passes it. The high score when the wall clears wins. |
+| **Borg Chess: Rapid Variant** | 2 + spectators | A full board game with standard piece movement, check, checkmate, stalemate, pawn promotion to a queen, and turn control. This rapid variant deliberately excludes castling and en passant; those rules appear in the in-game card. |
+| **Borg Fleet Engagement** | 2 + spectators | Each commander privately places a four-vessel fleet on an 8×8 grid, then scans one enemy coordinate per turn. Hits earn another scan; misses pass control. The first commander to destroy every enemy vessel wins. |
+
+The five additions share the existing PeerJS room connection: a host starts a room, remote players follow the invitation link, and the host browser holds the authoritative state during play. Fleet Engagement additionally sends each guest a view with the opposing fleet positions masked.
+
 ## Run it locally
 
 Open `index.html` in a modern browser. For the most reliable cross-device test, serve this directory from any static web server and visit the address from a second device. Create a room, copy the share link, and have another player open it. The host must keep the room tab open while the match is running.

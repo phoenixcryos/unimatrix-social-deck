@@ -80,6 +80,41 @@
       rule: "Take turns guessing the four distinct glyphs. Teal marks the right glyph in the right place; amber marks a glyph in the signal but in another place. Break the signal within 12 collective attempts to win.",
       min: 2,
     },
+    blocks: {
+      name: "Falling Block Skirmish",
+      players: "2–10 • score race",
+      summary: "Build, rotate, and drop polyominoes to clear a Borg matrix.",
+      rule: "Every drone has a 10×14 matrix and twelve blocks. Move, rotate, then hard-drop your active block. Each cleared horizontal line is worth 100 points. Clear five lines to win, or lead on points after every drone places twelve blocks.",
+      min: 2,
+    },
+    breaker: {
+      name: "Shield Breaker Fleet",
+      players: "2–10 • turn based",
+      summary: "Launch nanoprobes through shield lanes to shatter a brick wall.",
+      rule: "On your turn, choose one of six launch lanes. The nanoprobe follows a visible deterministic bounce path through your 6×5 shield wall and breaks every block it contacts. Clear your wall to win; after twelve shots each, the highest number of broken blocks wins.",
+      min: 2,
+    },
+    tiles: {
+      name: "Tile Matrix",
+      players: "2–10 • turn based",
+      summary: "Match exposed Borg tiles from a shared wall.",
+      rule: "On your turn, select two matching exposed tiles. A tile is exposed when its left or right neighbour is empty. A pair is worth 1 point and keeps your turn; a mismatch passes control. The high score when the wall clears wins.",
+      min: 2,
+    },
+    chess: {
+      name: "Borg Chess: Rapid Variant",
+      players: "2 • tactical",
+      summary: "A two-commander chess match with check and promotion.",
+      rule: "Pieces use standard chess movement. You may not leave your king in check. Checkmate or stalemate ends the match; pawns promote to queens. This rapid variant omits castling and en passant.",
+      min: 2,
+    },
+    fleet: {
+      name: "Borg Fleet Engagement",
+      players: "2 • hidden fleet",
+      summary: "Privately deploy vessels, then scan the enemy sector.",
+      rule: "Place your four vessels on an 8×8 sector grid. On your turn, scan one enemy coordinate. A hit earns another scan; a miss passes control. Sink every enemy vessel to win. Enemy placements remain masked until hit.",
+      min: 2,
+    },
   };
 
   const session = {
@@ -95,7 +130,7 @@
     connected: false,
     error: "",
   };
-  const ui = { adaptMode: false, matrixDraft: [], matrixRound: null, interceptDraft: [] };
+  const ui = { adaptMode: false, matrixDraft: [], matrixRound: null, interceptDraft: [], chessFrom: null, fleetShip: 0, fleetHorizontal: true };
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#039;", '"': "&quot;" })[char]);
   const shuffle = (items) => [...items].sort(() => Math.random() - 0.5);
@@ -166,11 +201,23 @@
     session.timers = [];
   }
 
+  function stateForViewer(playerId) {
+    const visible = JSON.parse(JSON.stringify(session.state));
+    const game = visible?.game;
+    if (game?.type === "fleet") {
+      game.active.filter((id) => id !== playerId).forEach((id) => {
+        game.boards[id] = game.boards[id].map(() => null);
+        game.fleets[id] = game.fleets[id].map((ship) => ({ index: ship.index, label: ship.label, size: ship.size }));
+      });
+    }
+    return visible;
+  }
+
   function broadcast() {
     if (!isHost() || !session.state) return;
     session.state.version += 1;
     session.connections.forEach((connection) => {
-      if (connection.open) connection.send({ type: "state", state: session.state });
+      if (connection.open) connection.send({ type: "state", state: stateForViewer(connection.peer) });
     });
     render();
   }
@@ -334,6 +381,14 @@
     if (game.type === "conquest" && action.type === "conquestMove") submitConquestMove(playerId, action.index, Boolean(action.adapt));
     if (game.type === "matrix" && action.type === "matrixSubmit") submitMatrix(playerId, action.value);
     if (game.type === "intercept" && action.type === "interceptGuess") submitIntercept(playerId, action.value);
+    if (game.type === "blocks" && action.type === "blockMove") moveBlock(playerId, Number(action.dx));
+    if (game.type === "blocks" && action.type === "blockRotate") rotateBlock(playerId);
+    if (game.type === "blocks" && action.type === "blockDrop") dropBlock(playerId);
+    if (game.type === "breaker" && action.type === "breakerFire") fireBreaker(playerId, Number(action.lane));
+    if (game.type === "tiles" && action.type === "tilePick") pickTile(playerId, Number(action.index));
+    if (game.type === "chess" && action.type === "chessMove") moveChess(playerId, Number(action.from), Number(action.to));
+    if (game.type === "fleet" && action.type === "fleetPlace") placeFleetShip(playerId, Number(action.ship), Number(action.index), Boolean(action.horizontal));
+    if (game.type === "fleet" && action.type === "fleetFire") fireFleetScan(playerId, Number(action.index));
     if (game.type === "accord" && action.type === "resolveAccord" && playerId === session.meId) resolveAccord();
   }
 
@@ -346,7 +401,7 @@
     }
     clearTimers();
     const type = session.state.gameType;
-    const active = type === "duel" ? session.state.players.slice(0, 2).map((player) => player.id) : session.state.players.map((player) => player.id);
+    const active = ["duel", "chess", "fleet"].includes(type) ? session.state.players.slice(0, 2).map((player) => player.id) : session.state.players.map((player) => player.id);
     session.state.phase = "game";
     session.state.message = "Simulation started.";
     session.state.game = { type, active, phase: "playing", startedAt: Date.now() };
@@ -355,6 +410,11 @@
     if (type === "conquest") startConquest();
     if (type === "matrix") startMatrix();
     if (type === "intercept") startIntercept();
+    if (type === "blocks") startBlocks();
+    if (type === "breaker") startBreaker();
+    if (type === "tiles") startTiles();
+    if (type === "chess") startChess();
+    if (type === "fleet") startFleet();
     broadcast();
   }
 
@@ -579,6 +639,397 @@
     broadcast();
   }
 
+  const BLOCK_TYPES = ["I", "O", "T", "L", "S"];
+  const TILE_SIGNS = ["◈", "◉", "◆", "✦", "▲", "●", "☍", "☌", "✚", "✣", "⌁", "⌬", "◐", "◑", "◒", "◓"];
+
+  function blockShape(type, rotation) {
+    const turn = rotation % 4;
+    const shapes = {
+      I: turn % 2 ? [[0, 0], [0, 1], [0, 2], [0, 3]] : [[0, 0], [1, 0], [2, 0], [3, 0]],
+      O: [[0, 0], [1, 0], [0, 1], [1, 1]],
+      T: [
+        [[0, 0], [1, 0], [2, 0], [1, 1]], [[1, 0], [0, 1], [1, 1], [1, 2]],
+        [[1, 0], [0, 1], [1, 1], [2, 1]], [[0, 0], [0, 1], [1, 1], [0, 2]],
+      ][turn],
+      L: [
+        [[0, 0], [0, 1], [0, 2], [1, 2]], [[0, 0], [1, 0], [2, 0], [0, 1]],
+        [[0, 0], [1, 0], [1, 1], [1, 2]], [[2, 0], [0, 1], [1, 1], [2, 1]],
+      ][turn],
+      S: turn % 2 ? [[1, 0], [0, 1], [1, 1], [0, 2]] : [[1, 0], [2, 0], [0, 1], [1, 1]],
+    };
+    return shapes[type];
+  }
+
+  function newBlock() {
+    return { type: BLOCK_TYPES[Math.floor(Math.random() * BLOCK_TYPES.length)], rotation: 0, x: 3, y: 0 };
+  }
+
+  function blockIndexes(piece) {
+    return blockShape(piece.type, piece.rotation).map(([x, y]) => (piece.y + y) * 10 + piece.x + x);
+  }
+
+  function validBlock(board, piece) {
+    return blockShape(piece.type, piece.rotation).every(([x, y]) => {
+      const column = piece.x + x;
+      const row = piece.y + y;
+      return column >= 0 && column < 10 && row >= 0 && row < 14 && !board[row * 10 + column];
+    });
+  }
+
+  function startBlocks() {
+    const game = currentGame();
+    const boards = {};
+    const pieces = {};
+    const scores = {};
+    const lines = {};
+    const drops = {};
+    const finished = {};
+    game.active.forEach((id) => {
+      boards[id] = Array(140).fill(null);
+      pieces[id] = newBlock();
+      scores[id] = 0;
+      lines[id] = 0;
+      drops[id] = 0;
+      finished[id] = false;
+    });
+    Object.assign(game, { boards, pieces, scores, lines, drops, finished, lastResult: "Move, rotate, then hard-drop your first polyomino." });
+  }
+
+  function finishBlocks(game, winnerId) {
+    game.phase = "complete";
+    if (winnerId) game.outcome = `${nameOf(winnerId)} clears five lines and wins the skirmish.`;
+    else {
+      const high = Math.max(...Object.values(game.scores));
+      const winners = game.active.filter((id) => game.scores[id] === high).map(nameOf);
+      game.outcome = winners.length === 1 ? `${winners[0]} wins on ${high} points.` : `The skirmish ends tied: ${winners.join(" and ")} each have ${high} points.`;
+    }
+  }
+
+  function moveBlock(playerId, dx) {
+    const game = currentGame();
+    const piece = game.pieces[playerId];
+    if (game.phase !== "playing" || game.finished[playerId] || !piece || ![-1, 1].includes(dx)) return;
+    const candidate = { ...piece, x: piece.x + dx };
+    if (validBlock(game.boards[playerId], candidate)) game.pieces[playerId] = candidate;
+    broadcast();
+  }
+
+  function rotateBlock(playerId) {
+    const game = currentGame();
+    const piece = game.pieces[playerId];
+    if (game.phase !== "playing" || game.finished[playerId] || !piece) return;
+    const candidate = { ...piece, rotation: (piece.rotation + 1) % 4 };
+    if (validBlock(game.boards[playerId], candidate)) game.pieces[playerId] = candidate;
+    broadcast();
+  }
+
+  function clearBlockRows(board) {
+    let cleared = 0;
+    for (let row = 13; row >= 0; row -= 1) {
+      if (board.slice(row * 10, row * 10 + 10).every(Boolean)) {
+        board.splice(row * 10, 10);
+        board.unshift(...Array(10).fill(null));
+        cleared += 1;
+        row += 1;
+      }
+    }
+    return cleared;
+  }
+
+  function dropBlock(playerId) {
+    const game = currentGame();
+    let piece = game.pieces[playerId];
+    if (game.phase !== "playing" || game.finished[playerId] || !piece) return;
+    while (validBlock(game.boards[playerId], { ...piece, y: piece.y + 1 })) piece = { ...piece, y: piece.y + 1 };
+    blockIndexes(piece).forEach((index) => { game.boards[playerId][index] = "block"; });
+    const cleared = clearBlockRows(game.boards[playerId]);
+    game.drops[playerId] += 1;
+    game.lines[playerId] += cleared;
+    game.scores[playerId] += 10 + cleared * 100;
+    game.lastResult = cleared ? `${nameOf(playerId)} clears ${cleared} line${cleared === 1 ? "" : "s"}.` : `${nameOf(playerId)} locks a block.`;
+    if (game.lines[playerId] >= 5) {
+      finishBlocks(game, playerId);
+    } else if (game.drops[playerId] >= 12) {
+      game.finished[playerId] = true;
+      game.pieces[playerId] = null;
+    } else {
+      const next = newBlock();
+      if (validBlock(game.boards[playerId], next)) game.pieces[playerId] = next;
+      else { game.finished[playerId] = true; game.pieces[playerId] = null; }
+    }
+    if (game.phase === "playing" && game.active.every((id) => game.finished[id])) finishBlocks(game);
+    broadcast();
+  }
+
+  function startBreaker() {
+    const game = currentGame();
+    const walls = {};
+    const scores = {};
+    const shots = {};
+    game.active.forEach((id) => { walls[id] = Array(30).fill(true); scores[id] = 0; shots[id] = 0; });
+    Object.assign(game, { walls, scores, shots, turn: 0, lastPath: [], lastResult: `${nameOf(game.active[0])} chooses the first launch lane.` });
+  }
+
+  function bouncedColumn(value) {
+    const cycle = ((value % 10) + 10) % 10;
+    return cycle < 6 ? cycle : 9 - cycle;
+  }
+
+  function breakerPath(lane, shot) {
+    const direction = shot % 2 === 0 ? 1 : -1;
+    return Array.from({ length: 5 }, (_, step) => step * 6 + bouncedColumn(lane + direction * step));
+  }
+
+  function finishBreaker(game) {
+    game.phase = "complete";
+    const high = Math.max(...Object.values(game.scores));
+    const winners = game.active.filter((id) => game.scores[id] === high).map(nameOf);
+    game.outcome = winners.length === 1 ? `${winners[0]} breaks the most shield blocks: ${high}.` : `Shield-breaking tie: ${winners.join(" and ")} each hit ${high} blocks.`;
+  }
+
+  function fireBreaker(playerId, lane) {
+    const game = currentGame();
+    if (game.phase !== "playing" || game.active[game.turn] !== playerId || !Number.isInteger(lane) || lane < 0 || lane > 5) return;
+    const path = breakerPath(lane, game.shots[playerId]);
+    let broken = 0;
+    path.forEach((index) => { if (game.walls[playerId][index]) { game.walls[playerId][index] = false; broken += 1; } });
+    game.scores[playerId] += broken;
+    game.shots[playerId] += 1;
+    game.lastPath = path;
+    game.lastResult = `${nameOf(playerId)} launches through lane ${lane + 1} and breaks ${broken} block${broken === 1 ? "" : "s"}.`;
+    if (game.walls[playerId].every((cell) => !cell)) {
+      game.phase = "complete";
+      game.outcome = `${nameOf(playerId)} clears an entire shield wall and wins.`;
+    } else if (game.active.every((id) => game.shots[id] >= 12)) {
+      finishBreaker(game);
+    } else {
+      game.turn = (game.turn + 1) % game.active.length;
+      game.lastResult += ` ${nameOf(game.active[game.turn])}'s turn.`;
+    }
+    broadcast();
+  }
+
+  function startTiles() {
+    const game = currentGame();
+    const wall = shuffle(TILE_SIGNS.flatMap((sign) => [sign, sign]));
+    Object.assign(game, { wall, scores: Object.fromEntries(game.active.map((id) => [id, 0])), turn: 0, selected: [], lastResult: `${nameOf(game.active[0])} begins the tile matrix.` });
+  }
+
+  function tileAvailable(wall, index) {
+    if (!wall[index]) return false;
+    const column = index % 8;
+    const leftOpen = column === 0 || !wall[index - 1];
+    const rightOpen = column === 7 || !wall[index + 1];
+    return leftOpen || rightOpen;
+  }
+
+  function finishTiles(game) {
+    game.phase = "complete";
+    const high = Math.max(...Object.values(game.scores));
+    const winners = game.active.filter((id) => game.scores[id] === high).map(nameOf);
+    game.outcome = winners.length === 1 ? `${winners[0]} clears the Tile Matrix with ${high} pairs.` : `The Tile Matrix ends tied: ${winners.join(" and ")} each have ${high} pairs.`;
+  }
+
+  function pickTile(playerId, index) {
+    const game = currentGame();
+    if (game.phase !== "playing" || game.active[game.turn] !== playerId || !Number.isInteger(index) || index < 0 || index >= game.wall.length || !tileAvailable(game.wall, index) || game.selected.includes(index)) return;
+    game.selected.push(index);
+    if (game.selected.length < 2) {
+      game.lastResult = `${nameOf(playerId)} selected a tile. Choose its match.`;
+      broadcast();
+      return;
+    }
+    const [first, second] = game.selected;
+    if (game.wall[first] === game.wall[second]) {
+      game.wall[first] = null;
+      game.wall[second] = null;
+      game.scores[playerId] += 1;
+      game.lastResult = `${nameOf(playerId)} matches a pair and keeps the turn.`;
+      if (game.wall.every((tile) => !tile)) finishTiles(game);
+    } else {
+      game.lastResult = `${nameOf(playerId)} misses the match. ${nameOf(game.active[(game.turn + 1) % game.active.length])}'s turn.`;
+      game.turn = (game.turn + 1) % game.active.length;
+    }
+    game.selected = [];
+    broadcast();
+  }
+
+  const CHESS_BACK_RANK = ["R", "N", "B", "Q", "K", "B", "N", "R"];
+  const CHESS_GLYPHS = { wK: "♔", wQ: "♕", wR: "♖", wB: "♗", wN: "♘", wP: "♙", bK: "♚", bQ: "♛", bR: "♜", bB: "♝", bN: "♞", bP: "♟" };
+
+  function chessSide(piece) { return piece?.[0]; }
+  function chessKind(piece) { return piece?.[1]; }
+  function chessRow(index) { return Math.floor(index / 8); }
+  function chessCol(index) { return index % 8; }
+
+  function createChessBoard() {
+    const board = Array(64).fill(null);
+    CHESS_BACK_RANK.forEach((kind, index) => { board[index] = `b${kind}`; board[8 + index] = "bP"; board[48 + index] = "wP"; board[56 + index] = `w${kind}`; });
+    return board;
+  }
+
+  function chessPathClear(board, from, to) {
+    const fromRow = chessRow(from); const fromCol = chessCol(from);
+    const toRow = chessRow(to); const toCol = chessCol(to);
+    const rowStep = Math.sign(toRow - fromRow); const colStep = Math.sign(toCol - fromCol);
+    let row = fromRow + rowStep; let col = fromCol + colStep;
+    while (row !== toRow || col !== toCol) {
+      if (board[row * 8 + col]) return false;
+      row += rowStep; col += colStep;
+    }
+    return true;
+  }
+
+  function chessPseudoMove(board, from, to, side, attackOnly = false) {
+    const piece = board[from];
+    if (!piece || chessSide(piece) !== side || from === to) return false;
+    const target = board[to];
+    if (!attackOnly && target && chessSide(target) === side) return false;
+    const rowDelta = chessRow(to) - chessRow(from);
+    const colDelta = chessCol(to) - chessCol(from);
+    const absRow = Math.abs(rowDelta); const absCol = Math.abs(colDelta);
+    const kind = chessKind(piece);
+    if (kind === "P") {
+      const direction = side === "w" ? -1 : 1;
+      const startRow = side === "w" ? 6 : 1;
+      if (attackOnly) return rowDelta === direction && absCol === 1;
+      if (absCol === 1 && rowDelta === direction && target && chessSide(target) !== side) return true;
+      if (colDelta === 0 && rowDelta === direction && !target) return true;
+      if (colDelta === 0 && chessRow(from) === startRow && rowDelta === direction * 2 && !target && !board[(chessRow(from) + direction) * 8 + chessCol(from)]) return true;
+      return false;
+    }
+    if (kind === "N") return (absRow === 2 && absCol === 1) || (absRow === 1 && absCol === 2);
+    if (kind === "K") return absRow <= 1 && absCol <= 1;
+    if (kind === "B") return absRow === absCol && chessPathClear(board, from, to);
+    if (kind === "R") return (rowDelta === 0 || colDelta === 0) && chessPathClear(board, from, to);
+    if (kind === "Q") return (rowDelta === 0 || colDelta === 0 || absRow === absCol) && chessPathClear(board, from, to);
+    return false;
+  }
+
+  function applyChessMove(board, from, to) {
+    const next = [...board];
+    let piece = next[from];
+    next[from] = null;
+    if (chessKind(piece) === "P" && [0, 7].includes(chessRow(to))) piece = `${chessSide(piece)}Q`;
+    next[to] = piece;
+    return next;
+  }
+
+  function chessInCheck(board, side) {
+    const king = board.findIndex((piece) => piece === `${side}K`);
+    if (king < 0) return true;
+    const enemy = side === "w" ? "b" : "w";
+    return board.some((piece, index) => chessSide(piece) === enemy && chessPseudoMove(board, index, king, enemy, true));
+  }
+
+  function legalChessMove(board, from, to, side) {
+    return chessPseudoMove(board, from, to, side) && !chessInCheck(applyChessMove(board, from, to), side);
+  }
+
+  function chessHasMove(board, side) {
+    return board.some((piece, from) => chessSide(piece) === side && board.some((_, to) => legalChessMove(board, from, to, side)));
+  }
+
+  function startChess() {
+    const game = currentGame();
+    Object.assign(game, {
+      board: createChessBoard(),
+      colors: { [game.active[0]]: "w", [game.active[1]]: "b" },
+      turn: "w",
+      history: [],
+      lastResult: `${nameOf(game.active[0])} commands White. Select a piece, then a legal destination.`,
+    });
+  }
+
+  function moveChess(playerId, from, to) {
+    const game = currentGame();
+    const side = game.colors[playerId];
+    if (game.phase !== "playing" || side !== game.turn || !Number.isInteger(from) || !Number.isInteger(to) || from < 0 || from > 63 || to < 0 || to > 63 || !legalChessMove(game.board, from, to, side)) return;
+    const moved = game.board[from];
+    const captured = game.board[to];
+    game.board = applyChessMove(game.board, from, to);
+    game.history.unshift({ side, from, to, moved, captured });
+    const nextSide = side === "w" ? "b" : "w";
+    const nextPlayer = game.active.find((id) => game.colors[id] === nextSide);
+    const check = chessInCheck(game.board, nextSide);
+    if (!chessHasMove(game.board, nextSide)) {
+      game.phase = "complete";
+      game.outcome = check ? `${nameOf(playerId)} achieves checkmate.` : "The game ends in stalemate.";
+    } else {
+      game.turn = nextSide;
+      const square = `${String.fromCharCode(97 + chessCol(to))}${8 - chessRow(to)}`;
+      game.lastResult = `${nameOf(playerId)} moves ${CHESS_GLYPHS[moved]} to ${square}${captured ? ` and captures ${CHESS_GLYPHS[captured]}` : ""}.${check ? " Check." : ` ${nameOf(nextPlayer)} to move.`}`;
+    }
+    broadcast();
+  }
+
+  const FLEET_SHIPS = [
+    { label: "Tactical Cube", size: 4 },
+    { label: "Assimilation Sphere", size: 3 },
+    { label: "Probe Wing", size: 3 },
+    { label: "Relay Node", size: 2 },
+  ];
+
+  function fleetCells(index, length, horizontal) {
+    const row = Math.floor(index / 8); const col = index % 8;
+    const cells = Array.from({ length }, (_, offset) => horizontal ? row * 8 + col + offset : (row + offset) * 8 + col);
+    if (cells.some((cell) => cell < 0 || cell >= 64)) return null;
+    if (horizontal && cells.some((cell) => Math.floor(cell / 8) !== row)) return null;
+    return cells;
+  }
+
+  function startFleet() {
+    const game = currentGame();
+    const boards = {}; const fleets = {}; const shots = {};
+    game.active.forEach((id) => { boards[id] = Array(64).fill(null); fleets[id] = []; shots[id] = Array(64).fill(null); });
+    Object.assign(game, { phase: "placement", boards, fleets, shots, turn: 0, lastResult: "Each commander privately places a four-vessel fleet." });
+  }
+
+  function fleetReady(game, playerId) { return game.fleets[playerId].length === FLEET_SHIPS.length; }
+
+  function placeFleetShip(playerId, shipIndex, index, horizontal) {
+    const game = currentGame();
+    if (game.phase !== "placement" || !Number.isInteger(shipIndex) || !FLEET_SHIPS[shipIndex] || game.fleets[playerId].some((ship) => ship.index === shipIndex)) return;
+    const cells = fleetCells(index, FLEET_SHIPS[shipIndex].size, horizontal);
+    if (!cells || cells.some((cell) => game.boards[playerId][cell])) return;
+    cells.forEach((cell) => { game.boards[playerId][cell] = `ship-${shipIndex}`; });
+    game.fleets[playerId].push({ index: shipIndex, label: FLEET_SHIPS[shipIndex].label, size: FLEET_SHIPS[shipIndex].size, cells, hits: 0 });
+    if (game.active.every((id) => fleetReady(game, id))) {
+      game.phase = "playing";
+      game.turn = 0;
+      game.lastResult = `${nameOf(game.active[0])} has the first scan.`;
+    } else {
+      game.lastResult = `${nameOf(playerId)} deployed ${FLEET_SHIPS[shipIndex].label}. Waiting for the other commander.`;
+    }
+    broadcast();
+  }
+
+  function fireFleetScan(playerId, index) {
+    const game = currentGame();
+    if (game.phase !== "playing" || game.active[game.turn] !== playerId || !Number.isInteger(index) || index < 0 || index >= 64) return;
+    const target = game.active.find((id) => id !== playerId);
+    if (game.shots[target][index]) return;
+    const vessel = game.boards[target][index];
+    const hit = Boolean(vessel);
+    game.shots[target][index] = hit ? "hit" : "miss";
+    let sunk = null;
+    if (hit) {
+      const ship = game.fleets[target].find((item) => `ship-${item.index}` === vessel);
+      ship.hits += 1;
+      if (ship.hits === ship.size) sunk = ship.label;
+    }
+    if (game.fleets[target].every((ship) => ship.hits >= ship.size)) {
+      game.phase = "complete";
+      game.outcome = `${nameOf(playerId)} destroys every enemy vessel and wins Fleet Engagement.`;
+    } else if (hit) {
+      game.lastResult = `${nameOf(playerId)} records a hit${sunk ? ` and sinks the ${sunk}` : ""}. A hit earns another scan.`;
+    } else {
+      game.turn = (game.turn + 1) % 2;
+      game.lastResult = `${nameOf(playerId)} misses. ${nameOf(game.active[game.turn])}'s turn.`;
+    }
+    broadcast();
+  }
+
   function renderLanding() {
     const queryRoom = new URLSearchParams(window.location.search).get("room") || "";
     const cards = Object.entries(META).map(([key, meta]) => `
@@ -663,6 +1114,11 @@
     if (game.type === "conquest") return `<span class="score">Alpha ${countTeam(game.board, "alpha")}</span><span class="score">Beta ${countTeam(game.board, "beta")}</span>`;
     if (game.type === "matrix") return game.active.map((id) => `<span class="score">${escapeHtml(nameOf(id))}: ${game.scores[id] || 0}</span>`).join("");
     if (game.type === "intercept") return `<span class="score">Attempt ${game.attempts.length}/12</span><span class="score">Turn: ${escapeHtml(nameOf(game.active[game.turn]))}</span>`;
+    if (game.type === "blocks") return game.active.map((id) => `<span class="score">${escapeHtml(nameOf(id))}: ${game.scores[id]} pts / ${game.lines[id]} lines</span>`).join("");
+    if (game.type === "breaker") return game.active.map((id) => `<span class="score">${escapeHtml(nameOf(id))}: ${game.scores[id]} broken</span>`).join("");
+    if (game.type === "tiles") return `<span class="score">Turn: ${escapeHtml(nameOf(game.active[game.turn]))}</span>` + game.active.map((id) => `<span class="score">${escapeHtml(nameOf(id))}: ${game.scores[id]} pairs</span>`).join("");
+    if (game.type === "chess") return `<span class="score">${game.turn === "w" ? "White" : "Black"} to move</span>`;
+    if (game.type === "fleet") return game.phase === "placement" ? `<span class="score">Private deployment</span>` : `<span class="score">Turn: ${escapeHtml(nameOf(game.active[game.turn]))}</span>`;
     return "";
   }
 
@@ -744,6 +1200,86 @@
     return renderGameShell(`<div class="center"><div class="brand">Subspace signal</div><p class="hint">${escapeHtml(game.lastResult)}</p>${controls}</div><div class="guess-history">${history}</div>${game.phase === "complete" ? completeBlock(game) : ""}${code}`);
   }
 
+  function renderBlocks() {
+    const game = currentGame();
+    const boardId = isActive() ? session.meId : game.active[0];
+    const activePiece = game.pieces[boardId];
+    const activeIndexes = new Set(activePiece ? blockIndexes(activePiece) : []);
+    const grid = game.boards[boardId].map((cell, index) => `<span class="block-cell ${cell ? "locked" : ""} ${activeIndexes.has(index) ? "falling" : ""}"></span>`).join("");
+    const canControl = game.phase === "playing" && boardId === session.meId && !game.finished[boardId];
+    const controls = canControl ? `<div class="host-tools block-controls"><button class="secondary" data-action="block-move" data-dx="-1">◀ Move</button><button class="secondary" data-action="block-rotate">↻ Rotate</button><button class="secondary" data-action="block-move" data-dx="1">Move ▶</button><button class="action" data-action="block-drop">Hard drop</button></div>` : "";
+    const status = game.finished[boardId] ? "Your matrix is complete." : `Block ${game.drops[boardId] + 1} of 12 • ${game.lines[boardId]}/5 lines`;
+    return renderGameShell(`<div class="center"><div class="brand">${escapeHtml(nameOf(boardId))}'s construction matrix</div><p class="hint">${status}</p><div class="block-board">${grid}</div>${controls}</div><p class="helper">${escapeHtml(game.lastResult)}</p>${game.phase === "complete" ? completeBlock(game) : ""}`);
+  }
+
+  function renderBreaker() {
+    const game = currentGame();
+    const boardId = isActive() ? session.meId : game.active[0];
+    const canFire = game.phase === "playing" && game.active[game.turn] === session.meId;
+    const wall = game.walls[boardId].map((brick, index) => `<span class="brick ${brick ? "intact" : "broken"} ${boardId === session.meId && game.lastPath.includes(index) ? "path" : ""}"></span>`).join("");
+    const lanes = Array.from({ length: 6 }, (_, lane) => `<button class="glyph" data-action="breaker-fire" data-lane="${lane}" ${!canFire ? "disabled" : ""}>${lane + 1}</button>`).join("");
+    return renderGameShell(`<div class="center"><div class="brand">${escapeHtml(nameOf(boardId))}'s shield wall</div><p class="hint">${game.shots[boardId]}/12 launches • ${game.active[game.turn] === session.meId ? "Choose a launch lane." : `${escapeHtml(nameOf(game.active[game.turn]))} is aiming.`}</p><div class="breaker-board">${wall}</div><div class="glyphs launch-lanes">${lanes}</div></div><p class="helper">${escapeHtml(game.lastResult)}</p>${game.phase === "complete" ? completeBlock(game) : ""}`);
+  }
+
+  function renderTiles() {
+    const game = currentGame();
+    const myTurn = game.phase === "playing" && game.active[game.turn] === session.meId;
+    const tiles = game.wall.map((tile, index) => {
+      const open = tileAvailable(game.wall, index);
+      const selected = game.selected.includes(index);
+      return `<button class="tile ${tile ? "" : "cleared"} ${open ? "exposed" : ""} ${selected ? "selected-choice" : ""}" data-action="tile-pick" data-index="${index}" ${!tile || !open || !myTurn ? "disabled" : ""}>${tile || ""}</button>`;
+    }).join("");
+    return renderGameShell(`<div class="center"><div class="brand">Shared tile wall</div><p class="hint">${myTurn ? "Choose two exposed matching tiles." : `${escapeHtml(nameOf(game.active[game.turn]))} is selecting tiles.`}</p><div class="tile-wall">${tiles}</div></div><p class="helper">${escapeHtml(game.lastResult)}</p>${game.phase === "complete" ? completeBlock(game) : ""}`);
+  }
+
+  function renderChess() {
+    const game = currentGame();
+    const side = game.colors[session.meId];
+    const canMove = game.phase === "playing" && side === game.turn;
+    if (!canMove) ui.chessFrom = null;
+    const squares = game.board.map((piece, index) => {
+      const selected = ui.chessFrom === index;
+      const legal = ui.chessFrom !== null && canMove && legalChessMove(game.board, ui.chessFrom, index, side);
+      const color = (chessRow(index) + chessCol(index)) % 2 ? "dark" : "light";
+      return `<button class="chess-square ${color} ${selected ? "selected-choice" : ""} ${legal ? "legal" : ""}" data-action="chess-square" data-index="${index}" ${!canMove ? "disabled" : ""}>${piece ? CHESS_GLYPHS[piece] : ""}</button>`;
+    }).join("");
+    const command = side ? `${side === "w" ? "White" : "Black"} command: ${canMove ? "select a piece, then a destination." : "await the opposing command."}` : "You are observing this rapid chess match.";
+    return renderGameShell(`<div class="center"><div class="brand">Rapid chess board</div><p class="hint">${command}</p><div class="chess-board">${squares}</div></div><p class="helper">${escapeHtml(game.lastResult)}</p>${game.phase === "complete" ? completeBlock(game) : ""}`);
+  }
+
+  function fleetGrid(game, boardId, enemy, interactive) {
+    return game.boards[boardId].map((vessel, index) => {
+      const shot = game.shots[boardId][index];
+      const classes = ["fleet-cell"];
+      if (!enemy && vessel) classes.push("vessel");
+      if (shot) classes.push(shot);
+      return `<button class="${classes.join(" ")}" data-action="fleet-cell" data-index="${index}" ${!interactive ? "disabled" : ""}>${shot === "hit" ? "✦" : shot === "miss" ? "·" : !enemy && vessel ? "◆" : ""}</button>`;
+    }).join("");
+  }
+
+  function renderFleet() {
+    const game = currentGame();
+    const me = session.meId;
+    const ownId = isActive() ? me : game.active[0];
+    if (game.phase === "placement") {
+      const remaining = FLEET_SHIPS.filter((ship, index) => !game.fleets[ownId].some((placed) => placed.index === index));
+      if (remaining.length && !remaining.some((ship) => FLEET_SHIPS.indexOf(ship) === ui.fleetShip)) ui.fleetShip = FLEET_SHIPS.indexOf(remaining[0]);
+      const canPlace = ownId === me && remaining.length > 0;
+      const ships = FLEET_SHIPS.map((ship, index) => {
+        const placed = game.fleets[ownId].some((item) => item.index === index);
+        return `<button class="${ui.fleetShip === index ? "action" : "secondary"}" data-action="fleet-select-ship" data-ship="${index}" ${placed || !canPlace ? "disabled" : ""}>${escapeHtml(ship.label)} • ${ship.size}</button>`;
+      }).join("");
+      const grid = fleetGrid(game, ownId, false, canPlace);
+      return renderGameShell(`<div class="center"><div class="brand">Private fleet deployment</div><p class="hint">${canPlace ? "Select a vessel, choose its orientation, then select its starting cell." : `${escapeHtml(nameOf(ownId))}'s fleet is ready. Waiting for the opposing commander.`}</p><div class="host-tools" style="justify-content:center">${ships}<button class="secondary" data-action="fleet-orientation" ${!canPlace ? "disabled" : ""}>${ui.fleetHorizontal ? "Horizontal" : "Vertical"}</button></div><div class="fleet-board">${grid}</div></div><p class="helper">${escapeHtml(game.lastResult)}</p>`);
+    }
+    const target = game.active.find((id) => id !== ownId);
+    const myTurn = game.phase === "playing" && ownId === me && game.active[game.turn] === me;
+    const enemyBoard = fleetGrid(game, target, true, myTurn);
+    const ownBoard = fleetGrid(game, ownId, false, false);
+    const body = `<div class="fleet-layout"><section><div class="brand">Enemy sector</div><div class="fleet-board">${enemyBoard}</div></section><section><div class="brand">Your sector</div><div class="fleet-board">${ownBoard}</div></section></div><p class="helper center">${escapeHtml(game.lastResult)}</p>${game.phase === "complete" ? completeBlock(game) : ""}`;
+    return renderGameShell(body);
+  }
+
   function render() {
     if (!session.state) {
       app.innerHTML = renderLanding();
@@ -753,7 +1289,16 @@
     let body = renderLobby();
     if (session.state.phase === "game") {
       const type = currentGame()?.type;
-      body = type === "accord" ? renderAccord() : type === "duel" ? renderDuel() : type === "conquest" ? renderConquest() : type === "matrix" ? renderMatrix() : renderIntercept();
+      body = type === "accord" ? renderAccord()
+        : type === "duel" ? renderDuel()
+        : type === "conquest" ? renderConquest()
+        : type === "matrix" ? renderMatrix()
+        : type === "intercept" ? renderIntercept()
+        : type === "blocks" ? renderBlocks()
+        : type === "breaker" ? renderBreaker()
+        : type === "tiles" ? renderTiles()
+        : type === "chess" ? renderChess()
+        : renderFleet();
     }
     app.innerHTML = header + body;
   }
@@ -791,6 +1336,30 @@
     if (action === "intercept-glyph") { if (!ui.interceptDraft.includes(button.dataset.glyph)) { ui.interceptDraft.push(button.dataset.glyph); render(); } return; }
     if (action === "intercept-clear") { ui.interceptDraft = []; render(); return; }
     if (action === "intercept-submit") { sendAction({ type: "interceptGuess", value: ui.interceptDraft }); ui.interceptDraft = []; return; }
+    if (action === "block-move") { sendAction({ type: "blockMove", dx: Number(button.dataset.dx) }); return; }
+    if (action === "block-rotate") { sendAction({ type: "blockRotate" }); return; }
+    if (action === "block-drop") { sendAction({ type: "blockDrop" }); return; }
+    if (action === "breaker-fire") { sendAction({ type: "breakerFire", lane: Number(button.dataset.lane) }); return; }
+    if (action === "tile-pick") { sendAction({ type: "tilePick", index: Number(button.dataset.index) }); return; }
+    if (action === "chess-square") {
+      const game = currentGame(); const index = Number(button.dataset.index); const side = game.colors[session.meId];
+      if (ui.chessFrom === null) {
+        if (chessSide(game.board[index]) === side) { ui.chessFrom = index; render(); }
+      } else if (chessSide(game.board[index]) === side) {
+        ui.chessFrom = index; render();
+      } else {
+        const from = ui.chessFrom; ui.chessFrom = null; sendAction({ type: "chessMove", from, to: index }); render();
+      }
+      return;
+    }
+    if (action === "fleet-select-ship") { ui.fleetShip = Number(button.dataset.ship); render(); return; }
+    if (action === "fleet-orientation") { ui.fleetHorizontal = !ui.fleetHorizontal; render(); return; }
+    if (action === "fleet-cell") {
+      const game = currentGame(); const index = Number(button.dataset.index);
+      if (game.phase === "placement") sendAction({ type: "fleetPlace", ship: ui.fleetShip, index, horizontal: ui.fleetHorizontal });
+      else sendAction({ type: "fleetFire", index });
+      return;
+    }
   });
 
   render();
